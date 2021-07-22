@@ -1,0 +1,17 @@
+name: gtzan_preprocess
+
+docker_env:
+  image: mlflow_pipeline:gtzan10_0.0.1
+  volumes: ["$(pwd)/data:/opt/data", "$(pwd)/mlruns:/tmp/mlruns"]
+
+entry_points:
+  preprocess:
+    parameters:
+      data: {type: string, default: gtzan}
+      downstream: {type: string, default: data/preprocess/}
+      cached_data_id: {type: string, default: ""}
+    command: |
+      python -m src.run \
+        --data {data} \
+        --downstream {downstream} \
+        --cached_data_id {cached_data_id}
