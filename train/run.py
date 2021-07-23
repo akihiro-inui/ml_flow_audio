@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from constants import MODEL_ENUM
-from models import VGG11, VGG16, GTZANDataset, SimpleModel, evaluate, train
+from models import GTZANDataset, SimpleModel, evaluate, train
 from torch.utils.data import DataLoader
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
@@ -18,6 +18,31 @@ from torchvision import transforms
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def compute_melspectrogram_with_fixed_length(audio, sampling_rate, num_of_samples=128):
+    try:
+        # compute a mel-scaled spectrogram
+        melspectrogram = librosa.feature.melspectrogram(y=audio,
+                                                        sr=sampling_rate,
+                                                        hop_length=256,
+                                                        win_length=512,
+                                                        n_mels=80)
+
+        # convert a power spectrogram to decibel units (log-mel spectrogram)
+        melspectrogram_db = librosa.power_to_db(melspectrogram, ref=np.max)
+
+        melspectrogram_length = melspectrogram_db.shape[1]
+
+        # pad or fix the length of spectrogram
+        if melspectrogram_length != num_of_samples:
+            melspectrogram_db = librosa.util.fix_length(melspectrogram_db,
+                                                        size=num_of_samples,
+                                                        axis=1,
+                                                        constant_values=(0, -80.0))
+        return melspectrogram_db
+    except Exception as err:
+        logger.error(f"Failed to extract mel-spectrogram: {err}")
 
 
 def start_run(
@@ -37,9 +62,9 @@ def start_run(
     writer = SummaryWriter(log_dir=tensorboard_directory)
 
     transform = transforms.Compose([
+        lambda x: x[0:22050*13],  # Clip to 10 seconds
         lambda x: x.astype(np.float32) / np.max(x),  # Normalize to to -1 to 1
-        lambda x: x[0:22050*10],  # Clip to 10 seconds
-        lambda x: librosa.feature.melspectrogram(x, sr=22050),
+        lambda x: compute_melspectrogram_with_fixed_length(x, 22050),
         lambda x: Tensor(x)
     ])
 
@@ -69,10 +94,6 @@ def start_run(
 
     if model_type == MODEL_ENUM.SIMPLE_MODEL.value:
         model = SimpleModel().to(device)
-    elif model_type == MODEL_ENUM.VGG11.value:
-        model = VGG11().to(device)
-    elif model_type == MODEL_ENUM.VGG16.value:
-        model = VGG16().to(device)
     else:
         raise ValueError("Unknown model")
     model.eval()
@@ -117,15 +138,15 @@ def start_run(
 
     torch.save(model.state_dict(), model_file_name)
 
-    dummy_input = torch.randn(1, 3, 32, 32)
-    torch.onnx.export(
-        model,
-        dummy_input,
-        onnx_file_name,
-        verbose=True,
-        input_names=["input"],
-        output_names=["output"],
-    )
+    #dummy_input = torch.randn(128, 4, 4)
+    # torch.onnx.export(
+    #     model,
+    #     dummy_input,
+    #     onnx_file_name,
+    #     verbose=True,
+    #     input_names=["input"],
+    #     output_names=["output"],
+    # )
 
     mlflow.log_param("optimizer", "Adam")
     mlflow.log_param(
@@ -140,7 +161,7 @@ def start_run(
     mlflow.log_metric("accuracy", accuracy)
     mlflow.log_metric("loss", loss)
     mlflow.log_artifact(model_file_name)
-    mlflow.log_artifact(onnx_file_name)
+    # mlflow.log_artifact(onnx_file_name)
     mlflow.log_artifacts(tensorboard_directory, artifact_path="tensorboard")
 
 
@@ -170,7 +191,7 @@ def main():
     parser.add_argument(
         "--epochs",
         type=int,
-        default=1,
+        default=10,
         help="epochs",
     )
     parser.add_argument(

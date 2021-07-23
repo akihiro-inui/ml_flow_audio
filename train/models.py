@@ -7,6 +7,7 @@ import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 import numpy as np
 from scipy.io import wavfile
+import torchaudio
 import librosa
 import torch
 import torch.nn as nn
@@ -54,9 +55,8 @@ class GTZANDataset(Dataset):
 
         for file_path in file_path_list:
             try:
-                # _, data = librosa.load(file_path, duration=10)
-                _, data = wavfile.read(file_path)
-                self.audio_array_list.append(np.array(data))
+                data, _ = librosa.load(file_path, duration=10)
+                self.audio_array_list.append(data)
             except Exception as err:
                 logger.error(f"Failed to load file: {file_path}: {err}")
         logger.info(f"loaded: {len(self.label_list)} data")
@@ -65,166 +65,26 @@ class GTZANDataset(Dataset):
 class SimpleModel(nn.Module):
     def __init__(self):
         super(SimpleModel, self).__init__()
-        self.model = models.resnet50(pretrained=True)
-        self.model.fc = nn.Linear(2048, 10)
+        self.conv1 = nn.Conv2d(1, 128, 4)
+        self.maxpool1 = nn.MaxPool2d(4)
+        self.dropout1 = nn.Dropout2d(0.25)
+        self.flatten1 = nn.Flatten()
+        self.dense1 = nn.Linear(75392, 32)
+        self.relu1 = nn.ReLU()
+        self.dropout2 = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(32, 10)
 
     def forward(self, x):
-        output = self.model(x)
-        return output
-
-
-class VGG11(nn.Module):
-    def __init__(self):
-        super(VGG11, self).__init__()
-        num_classes = 10
-
-        self.block1_output = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-        )
-
-        self.block2_output = nn.Sequential(
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-        )
-
-        self.block3_output = nn.Sequential(
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-        )
-
-        self.block4_output = nn.Sequential(
-            nn.Conv2d(256, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-        )
-
-        self.block5_output = nn.Sequential(
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-        )
-
-        self.classifier = nn.Sequential(
-            nn.Linear(512, 512),
-            nn.ReLU(True),
-            nn.Dropout(),
-            nn.Linear(512, 32),
-            nn.ReLU(True),
-            nn.Dropout(),
-            nn.Linear(32, num_classes),
-        )
-
-    def forward(self, x):
-        x = self.block1_output(x)
-        x = self.block2_output(x)
-        x = self.block3_output(x)
-        x = self.block4_output(x)
-        x = self.block5_output(x)
-        x = x.view(x.size(0), -1)
-        x = self.classifier(x)
-        return x
-
-
-class VGG16(nn.Module):
-    def __init__(self):
-        super(VGG16, self).__init__()
-        num_classes = 10
-
-        self.block1_output = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-        )
-
-        self.block2_output = nn.Sequential(
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-        )
-
-        self.block3_output = nn.Sequential(
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-        )
-
-        self.block4_output = nn.Sequential(
-            nn.Conv2d(256, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-        )
-
-        self.block5_output = nn.Sequential(
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-        )
-
-        self.classifier = nn.Sequential(
-            nn.Linear(512, 512),
-            nn.ReLU(True),
-            nn.Dropout(),
-            nn.Linear(512, 32),
-            nn.ReLU(True),
-            nn.Dropout(),
-            nn.Linear(32, num_classes),
-        )
-
-    def forward(self, x):
-        x = self.block1_output(x)
-        x = self.block2_output(x)
-        x = self.block3_output(x)
-        x = self.block4_output(x)
-        x = self.block5_output(x)
-        x = x.view(x.size(0), -1)
-        x = self.classifier(x)
+        x = x.unsqueeze(1)
+        x = self.conv1(x)
+        x = self.maxpool1(x)
+        x = self.dropout1(x)
+        x = self.flatten1(x)
+        x = self.dense1(x)
+        x = self.relu1(x)
+        x = self.dropout2(x)
+        x = self.fc2(x)
+        x = F.log_softmax(x, dim=1)
         return x
 
 
@@ -274,7 +134,7 @@ def train(
         logger.info(f"starting epoch: {epoch}")
         epoch_start = time.time()
         start = time.time()
-        for index, (data, label) in enumerate(train_dataloader, 0):
+        for i, data in enumerate(train_dataloader, 0):
             images, labels = data[0].to(device), data[1].to(device)
             optimizer.zero_grad()
 
