@@ -2,14 +2,18 @@ import logging
 import os
 import time
 from typing import Tuple
+import ssl
 
+ssl._create_default_https_context = ssl._create_unverified_context
 import numpy as np
 from scipy.io import wavfile
+import librosa
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
+import torchvision.models as models
 from configuration import PreprocessConfigurations
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -50,6 +54,7 @@ class GTZANDataset(Dataset):
 
         for file_path in file_path_list:
             try:
+                # _, data = librosa.load(file_path, duration=10)
                 _, data = wavfile.read(file_path)
                 self.audio_array_list.append(np.array(data))
             except Exception as err:
@@ -60,21 +65,12 @@ class GTZANDataset(Dataset):
 class SimpleModel(nn.Module):
     def __init__(self):
         super(SimpleModel, self).__init__()
-        self.conv1 = nn.Conv2d(3, 6, 5)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.conv2 = nn.Conv2d(6, 16, 5)
-        self.fc1 = nn.Linear(16 * 5 * 5, 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 10)
+        self.model = models.resnet50(pretrained=True)
+        self.model.fc = nn.Linear(2048, 10)
 
     def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = x.view(-1, 16 * 5 * 5)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
+        output = self.model(x)
+        return output
 
 
 class VGG11(nn.Module):
@@ -278,6 +274,15 @@ def train(
         logger.info(f"starting epoch: {epoch}")
         epoch_start = time.time()
         start = time.time()
+        for index, (data, label) in enumerate(train_dataloader, 0):
+            images, labels = data[0].to(device), data[1].to(device)
+            optimizer.zero_grad()
+
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
         for i, data in enumerate(train_dataloader, 0):
             images, labels = data[0].to(device), data[1].to(device)
 

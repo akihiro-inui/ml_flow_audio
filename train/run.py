@@ -38,7 +38,8 @@ def start_run(
 
     transform = transforms.Compose([
         lambda x: x.astype(np.float32) / np.max(x),  # Normalize to to -1 to 1
-        lambda x: librosa.feature.mfcc(x, sr=44100, n_mfcc=40), # MFCC
+        lambda x: x[0:22050*10],  # Clip to 10 seconds
+        lambda x: librosa.feature.melspectrogram(x, sr=22050),
         lambda x: Tensor(x)
     ])
 
@@ -181,7 +182,7 @@ def main():
     parser.add_argument(
         "--num_workers",
         type=int,
-        default=1,
+        default=0,
         help="number of workers",
     )
     parser.add_argument(
