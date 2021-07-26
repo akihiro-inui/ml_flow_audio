@@ -1,9 +1,6 @@
 import os
-from logging import getLogger
-
-from constants import CONSTANTS, PLATFORM_ENUM
-
-logger = getLogger(__name__)
+from constants import PLATFORM_ENUM
+from utils.common_logger import logger
 
 
 class PlatformConfigurations:
@@ -13,6 +10,7 @@ class PlatformConfigurations:
 
 
 class PreprocessConfigurations:
+
     classes = {
         0: "blues",
         1: "classical",
@@ -25,6 +23,7 @@ class PreprocessConfigurations:
         8: "reggae",
         9: "rock",
     }
+
     label2int = {value: key for key, value in classes.items()}
 
 

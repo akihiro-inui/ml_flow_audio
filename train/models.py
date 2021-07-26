@@ -1,89 +1,49 @@
-import logging
 import os
 import time
 from typing import Tuple
-import ssl
-
-ssl._create_default_https_context = ssl._create_unverified_context
-import numpy as np
-from scipy.io import wavfile
-import torchaudio
-import librosa
+import mlflow
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-import torchvision.models as models
-from configuration import PreprocessConfigurations
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-
-class GTZANDataset(Dataset):
-    def __init__(self, data_directory, transform):
-        super().__init__()
-        self.label2int = PreprocessConfigurations.label2int
-        self.data_directory = data_directory
-        self.transform = transform
-        self.audio_array_list = []
-        self.label_list = []
-        self.__load_audio_files_and_labels()
-
-    def __len__(self):
-        return len(self.audio_array_list)
-
-    def __getitem__(self, index):
-        audio_array = self.audio_array_list[index]
-
-        audio_tensor = self.transform(audio_array)
-        label = self.label_list[index]
-
-        return audio_tensor, label
-
-    def __load_audio_files_and_labels(self):
-        """
-        File paths list as ["~/something.wav", "~/something_else.wav"]
-        label_list as [0,0,0,0,1,1,1,1,....]
-        """
-        file_path_list = []
-        sub_folder_names = [folder_name for folder_name in os.listdir(self.data_directory) if not folder_name.startswith('.')]
-        for sub_folder_name in sub_folder_names:
-            class_int = self.label2int[sub_folder_name]
-            file_path_list.extend([os.path.join(self.data_directory, sub_folder_name, file_name) for file_name in os.listdir(os.path.join(self.data_directory, sub_folder_name))])
-            self.label_list.extend([int(class_int) for _ in os.listdir(os.path.join(self.data_directory, sub_folder_name))])
-
-        for file_path in file_path_list:
-            try:
-                data, _ = librosa.load(file_path, duration=10)
-                self.audio_array_list.append(data)
-            except Exception as err:
-                logger.error(f"Failed to load file: {file_path}: {err}")
-        logger.info(f"loaded: {len(self.label_list)} data")
+from utils.common_logger import logger
 
 
 class SimpleModel(nn.Module):
     def __init__(self):
         super(SimpleModel, self).__init__()
-        self.conv1 = nn.Conv2d(1, 128, 4)
-        self.maxpool1 = nn.MaxPool2d(4)
-        self.dropout1 = nn.Dropout2d(0.25)
-        self.flatten1 = nn.Flatten()
-        self.dense1 = nn.Linear(75392, 32)
+        # TODO: Something is wrong. Fix it. Torch version of Input size for Convolution
+        self.conv1 = nn.Conv2d(1, 1, kernel_size=(57, 6), stride=(1, 1), padding_mode="replicate", padding=(1, 1))
         self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout2d(0.5)
+        self.maxpool1 = nn.MaxPool2d(kernel_size=(4, 3))
+        self.conv2 = nn.Conv2d(1, 1, kernel_size=(1, 3), stride=(1, 1), padding_mode="replicate", padding=(1, 1))
+        self.relu2 = nn.ReLU()
+        self.maxpool2 = nn.MaxPool2d(kernel_size=(1, 3))
+        self.flatten1 = nn.Flatten()
+        self.dense1 = nn.Linear(153, 16)
         self.dropout2 = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(32, 10)
+        self.dense2 = nn.Linear(16, 16)
+        self.dropout3 = nn.Dropout(0.5)
+        self.fc1 = nn.Linear(16, 10)
 
     def forward(self, x):
         x = x.unsqueeze(1)
         x = self.conv1(x)
-        x = self.maxpool1(x)
+        x = self.relu1(x)
         x = self.dropout1(x)
+        x = self.maxpool1(x)
+        x = self.conv2(x)
+        x = self.relu2(x)
+        x = self.maxpool2(x)
         x = self.flatten1(x)
         x = self.dense1(x)
-        x = self.relu1(x)
         x = self.dropout2(x)
-        x = self.fc2(x)
+        x = self.dense2(x)
+        x = self.dropout3(x)
+        x = self.fc1(x)
         x = F.log_softmax(x, dim=1)
         return x
 
@@ -125,13 +85,14 @@ def train(
         optimizer,
         writer: SummaryWriter,
         epochs: int = 10,
-        checkpoints_directory: str = "/opt/gtzan/model/",
+        model_directory: str = "/opt/gtzan/model/",
         device: str = "cpu",
 ):
-    logger.info("start training...")
+    logger.info("Start training...")
     for epoch in range(epochs):
+        epoch_to_vis = epoch+1
         running_loss = 0.0
-        logger.info(f"starting epoch: {epoch}")
+        logger.info(f"Starting epoch: {epoch_to_vis}")
         epoch_start = time.time()
         start = time.time()
         for i, data in enumerate(train_dataloader, 0):
@@ -159,13 +120,13 @@ def train(
 
             if i % 200 == 199:
                 end = time.time()
-                logger.info(f"[{epoch}, {i}] loss: {running_loss / 200} duration: {end - start}")
+                logger.info(f"[{epoch_to_vis}, {i}] loss: {running_loss / 200} duration: {end - start}")
                 running_loss = 0.0
                 start = time.time()
         epoch_end = time.time()
-        logger.info(f"[{epoch}] duration in seconds: {epoch_end - epoch_start}")
+        logger.info(f"Finished epoch {epoch_to_vis}: duration in seconds: {epoch_end - epoch_start}")
 
-        _, loss = evaluate(
+        accuracy, loss = evaluate(
             model=model,
             test_dataloader=test_dataloader,
             criterion=criterion,
@@ -173,6 +134,8 @@ def train(
             epoch=epoch,
             device=device,
         )
-        checkpoints = os.path.join(checkpoints_directory, f"epoch_{epoch}_loss_{loss}.pth")
-        logger.info(f"save checkpoints: {checkpoints}")
+        checkpoints = os.path.join(model_directory, f"epoch_{epoch}_loss_{loss}.pth")
+        logger.info(f"Save checkpoints: {checkpoints}")
         torch.save(model.state_dict(), checkpoints)
+        mlflow.log_metric("accuracy", accuracy)
+        mlflow.log_metric("loss", loss)

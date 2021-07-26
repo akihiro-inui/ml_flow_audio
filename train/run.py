@@ -1,54 +1,85 @@
-import argparse
-import logging
 import os
-
 import mlflow
-import librosa
+import argparse
 import numpy as np
 import mlflow.pytorch
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from constants import MODEL_ENUM
-from models import GTZANDataset, SimpleModel, evaluate, train
-from torch.utils.data import DataLoader
 from torch import Tensor
+import torch.optim as optim
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
+from constants import MODEL_ENUM
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from train.dataset import GTZANDataSet
+from train.models import SimpleModel, evaluate, train
+from utils.feature_extraction import extract_melspectrogram
+from utils.common_logger import logger
 
 
-def compute_melspectrogram_with_fixed_length(audio, sampling_rate, num_of_samples=128):
+def get_model(model_type: str, device: str):
+    """
+    Get ML or DSP model from MODEL_ENUM
+    :param model_type: Name of model
+    :param device: Device "cpu" or "cuda:0"
+    :return: Model
+    """
     try:
-        # compute a mel-scaled spectrogram
-        melspectrogram = librosa.feature.melspectrogram(y=audio,
-                                                        sr=sampling_rate,
-                                                        hop_length=256,
-                                                        win_length=512,
-                                                        n_mels=80)
-
-        # convert a power spectrogram to decibel units (log-mel spectrogram)
-        melspectrogram_db = librosa.power_to_db(melspectrogram, ref=np.max)
-
-        melspectrogram_length = melspectrogram_db.shape[1]
-
-        # pad or fix the length of spectrogram
-        if melspectrogram_length != num_of_samples:
-            melspectrogram_db = librosa.util.fix_length(melspectrogram_db,
-                                                        size=num_of_samples,
-                                                        axis=1,
-                                                        constant_values=(0, -80.0))
-        return melspectrogram_db
+        if model_type == MODEL_ENUM.SIMPLE_MODEL.value:
+            model = SimpleModel().to(device)
+        else:
+            raise ValueError("Unknown model")
+        model.eval()
+        mlflow.pytorch.log_model(model, "model")
+        return model
+    except ValueError:
+        logger.error(f"Could not find the model: {MODEL_ENUM.SIMPLE_MODEL.value}")
     except Exception as err:
-        logger.error(f"Failed to extract mel-spectrogram: {err}")
+        logger.error(f"Could not load model: {err}")
+
+
+def get_transformer(sample_rate: int, duration: int):
+    """
+    Get Transformer that is applied to input data
+    :param sample_rate: Sample rate
+    :param duration: Duration in seconds
+    :return: Torch transform
+    """
+    return transforms.Compose([
+        lambda x: x[0:sample_rate*duration],  # Clip to {duration} seconds
+        lambda x: x.astype(np.float32) / np.max(x),  # Normalize time domain signal to to -1 to 1
+        lambda x: extract_melspectrogram(audio=x, sampling_rate=sample_rate),
+        lambda x: Tensor(x)
+    ])
+
+
+def get_data_loader(data_directory_path: str, transformer, batch_size: int, shuffle: bool = True, num_workers: int = 0)\
+        -> DataLoader:
+    """
+    Get dataset
+    :param data_directory_path: Directory path where files exist e.g. data/gtzan/preprocess/train
+    :param transformer: Torch transform function
+    :param batch_size: Batch size
+    :param shuffle: Boolean to shuffle dataset order
+    :param num_workers: Number of workers for data loader
+    :return: Torch DataLoader class
+    """
+    try:
+        train_dataset = GTZANDataSet(data_directory=data_directory_path, transform=transformer)
+        return DataLoader(train_dataset,
+                          batch_size=batch_size,
+                          shuffle=shuffle,
+                          num_workers=num_workers)
+
+    except Exception as err:
+        logger.error(f"Failed to get DataLoader: {err}")
 
 
 def start_run(
         mlflow_experiment_id: int,
-        upstream_directory: str,
-        downstream_directory: str,
+        data_directory: str,
+        model_directory: str,
         tensorboard_directory: str,
         batch_size: int,
         num_workers: int,
@@ -56,53 +87,56 @@ def start_run(
         learning_rate: float,
         model_type: str,
 ):
-    device = torch.device(
-        "cuda:0" if torch.cuda.is_available() else "cpu",
-    )
+    """
+    Run Model training
+    :param mlflow_experiment_id: Int experiment ID
+    :param data_directory: Directory path to dataset
+    :param model_directory: Directory path to save model checkpoints
+    :param tensorboard_directory: Directory path to store tensorboard
+    :param batch_size: Batch size for training
+    :param num_workers: Number of workers for Data Loader
+    :param epochs: Number of epochs for training
+    :param learning_rate: Learning rate
+    :param model_type: Name of model e.g. "simple"
+
+    This function executes the followings:
+    1. Get available device, cpu or gpu
+    2. Get transformer
+    3. Get train & test dataset
+    4. Get model
+    5. Train model
+    6. Evaluate model performance
+    7. Save model file and checkpoints
+    """
+    # 1. Get available device
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
     writer = SummaryWriter(log_dir=tensorboard_directory)
 
-    transform = transforms.Compose([
-        lambda x: x[0:22050*13],  # Clip to 10 seconds
-        lambda x: x.astype(np.float32) / np.max(x),  # Normalize to to -1 to 1
-        lambda x: compute_melspectrogram_with_fixed_length(x, 22050),
-        lambda x: Tensor(x)
-    ])
+    # 2. Get transformer
+    transform = get_transformer(sample_rate=8000, duration=30)
 
-    train_dataset = GTZANDataset(
-        data_directory=os.path.join(upstream_directory, "train"),
-        transform=transform,
-    )
+    # 3. Get training & test dataset
+    logger.info("Loading training dataset")
+    train_dataloader = get_data_loader(data_directory_path=os.path.join(data_directory, "train"),
+                                       transformer=transform,
+                                       batch_size=batch_size,
+                                       shuffle=True,
+                                       num_workers=num_workers)
 
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-    )
+    logger.info("Loading test dataset")
+    test_dataloader = get_data_loader(data_directory_path=os.path.join(data_directory, "test"),
+                                      transformer=transform,
+                                      batch_size=batch_size,
+                                      shuffle=False,
+                                      num_workers=num_workers)
 
-    test_dataset = GTZANDataset(
-        data_directory=os.path.join(upstream_directory, "test"),
-        transform=transform,
-    )
-
-    test_dataloader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-    )
-
-    if model_type == MODEL_ENUM.SIMPLE_MODEL.value:
-        model = SimpleModel().to(device)
-    else:
-        raise ValueError("Unknown model")
-    model.eval()
-
-    mlflow.pytorch.log_model(model, "model")
+    # 4. Get model
+    model = get_model(model_type, device)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
+    # 5. Train model
     train(
         model=model,
         train_dataloader=train_dataloader,
@@ -111,48 +145,29 @@ def start_run(
         optimizer=optimizer,
         epochs=epochs,
         writer=writer,
-        checkpoints_directory=downstream_directory,
+        model_directory=model_directory,
         device=device,
     )
 
+    # 6. Evaluate model performance
     accuracy, loss = evaluate(
         model=model,
         test_dataloader=test_dataloader,
         criterion=criterion,
         writer=writer,
-        epoch=epochs + 1,
+        epoch=epochs,
         device=device,
     )
     logger.info(f"Latest performance: Accuracy: {accuracy}, Loss: {loss}")
 
     writer.close()
 
-    model_file_name = os.path.join(
-        downstream_directory,
-        f"gtzan_{mlflow_experiment_id}.pth",
-    )
-    onnx_file_name = os.path.join(
-        downstream_directory,
-        f"gtzan_{mlflow_experiment_id}.onnx",
-    )
+    # 7. Save model file and checkpoints
+    model_file_path = os.path.join(model_directory, f"gtzan_{mlflow_experiment_id}.pth")
+    torch.save(model.state_dict(), model_file_path)
 
-    torch.save(model.state_dict(), model_file_name)
-
-    #dummy_input = torch.randn(128, 4, 4)
-    # torch.onnx.export(
-    #     model,
-    #     dummy_input,
-    #     onnx_file_name,
-    #     verbose=True,
-    #     input_names=["input"],
-    #     output_names=["output"],
-    # )
-
+    # MLFlow log
     mlflow.log_param("optimizer", "Adam")
-    mlflow.log_param(
-        "preprocess",
-        "Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))",
-    )
     mlflow.log_param("epochs", epochs)
     mlflow.log_param("learning_rate", learning_rate)
     mlflow.log_param("batch_size", batch_size)
@@ -160,44 +175,44 @@ def start_run(
     mlflow.log_param("device", device)
     mlflow.log_metric("accuracy", accuracy)
     mlflow.log_metric("loss", loss)
-    mlflow.log_artifact(model_file_name)
-    # mlflow.log_artifact(onnx_file_name)
+    mlflow.log_artifact(model_file_path)
     mlflow.log_artifacts(tensorboard_directory, artifact_path="tensorboard")
 
 
 def main():
+    # Arg parser
     parser = argparse.ArgumentParser(
         description="Train GTZAN Genre Classification Model",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
-        "--upstream",
+        "--data_directory",
         type=str,
-        default="../data/gtzan/preprocess",
-        help="upstream directory",
+        default="./data/gtzan/preprocess",
+        help="data directory",
     )
     parser.add_argument(
-        "--downstream",
+        "--model_directory",
         type=str,
-        default="../data/gtzan/model/",
-        help="downstream directory",
+        default="./data/gtzan/model/",
+        help="model directory",
     )
     parser.add_argument(
-        "--tensorboard",
+        "--tensorboard_directory",
         type=str,
-        default="../data/gtzan/tensorboard/",
+        default="./data/gtzan/tensorboard/",
         help="tensorboard directory",
     )
     parser.add_argument(
         "--epochs",
         type=int,
-        default=10,
+        default=100,
         help="epochs",
     )
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=32,
+        default=16,
         help="batch size",
     )
     parser.add_argument(
@@ -209,7 +224,7 @@ def main():
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=0.001,
+        default=0.0001,
         help="learning rate",
     )
     parser.add_argument(
@@ -217,26 +232,26 @@ def main():
         type=str,
         default=MODEL_ENUM.SIMPLE_MODEL.value,
         choices=[
-            MODEL_ENUM.SIMPLE_MODEL.value,
-            MODEL_ENUM.VGG11.value,
-            MODEL_ENUM.VGG16.value,
+            MODEL_ENUM.SIMPLE_MODEL.value
         ],
         help="simple, vgg11 or vgg16",
     )
     args = parser.parse_args()
+
+    # Get args
     mlflow_experiment_id = int(os.getenv("MLFLOW_EXPERIMENT_ID", 0))
+    data_directory = args.data_directory
 
-    upstream_directory = args.upstream
-    downstream_directory = args.downstream
-    tensorboard_directory = args.tensorboard
-    os.makedirs(downstream_directory, exist_ok=True)
-    os.makedirs(tensorboard_directory, exist_ok=True)
+    # Create empty directories to save model files
+    os.makedirs(args.model_directory, exist_ok=True)
+    os.makedirs(args.tensorboard_directory, exist_ok=True)
 
+    # Start training
     start_run(
         mlflow_experiment_id=mlflow_experiment_id,
-        upstream_directory=upstream_directory,
-        downstream_directory=downstream_directory,
-        tensorboard_directory=tensorboard_directory,
+        data_directory=data_directory,
+        model_directory=args.model_directory,
+        tensorboard_directory=args.tensorboard_directory,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         epochs=args.epochs,
