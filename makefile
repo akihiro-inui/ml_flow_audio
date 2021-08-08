@@ -10,12 +10,6 @@ DOCKERFILE := Dockerfile
 install:
 	pip install -r requirements.txt
 
-.PHONY: docker_build
-docker_build:
-	docker build \
-		-t $(BASE_IMAGE_NAME):$(TRAINING_PATTERN)_$(TRAINING_DATASET)_$(IMAGE_VERSION) \
-		-f $(DOCKERFILE) .
-
 .PHONY: train
 train:
 	mlflow run . --no-conda

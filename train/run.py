@@ -14,6 +14,7 @@ from constants import MODEL_ENUM
 
 from train.dataset import GTZANDataSet
 from train.models import SimpleModel, evaluate, train
+from utils.data_process import spec_to_image
 from utils.feature_extraction import extract_melspectrogram
 from utils.common_logger import logger
 
@@ -50,8 +51,9 @@ def get_transformer(sample_rate: int, duration: int):
         lambda x: x[0:sample_rate*duration],  # Clip to {duration} seconds
         lambda x: x.astype(np.float32) / np.max(x),  # Normalize time domain signal to to -1 to 1
         lambda x: extract_melspectrogram(audio=x, sampling_rate=sample_rate),
+        lambda x: spec_to_image(x),
         lambda x: Tensor(x)
-    ])
+        ])
 
 
 def get_data_loader(data_directory_path: str, transformer, batch_size: int, shuffle: bool = True, num_workers: int = 0)\
@@ -132,9 +134,10 @@ def start_run(
 
     # 4. Get model
     model = get_model(model_type, device)
-
+    # optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=epochs//3, gamma=0.1)
 
     # 5. Train model
     train(
@@ -145,8 +148,9 @@ def start_run(
         optimizer=optimizer,
         epochs=epochs,
         writer=writer,
+        scheduler=scheduler,
         model_directory=model_directory,
-        device=device,
+        device=device
     )
 
     # 6. Evaluate model performance
@@ -206,13 +210,13 @@ def main():
     parser.add_argument(
         "--epochs",
         type=int,
-        default=100,
+        default=30,
         help="epochs",
     )
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=16,
+        default=64,
         help="batch size",
     )
     parser.add_argument(
@@ -224,7 +228,7 @@ def main():
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=0.0001,
+        default=0.001,
         help="learning rate",
     )
     parser.add_argument(

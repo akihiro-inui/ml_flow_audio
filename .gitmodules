@@ -1,0 +1,3 @@
+[submodule "mir_library"]
+	path = mir_library
+	url = git@github.com:Filament-lab/mir_library.git
